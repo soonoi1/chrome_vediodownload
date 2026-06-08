@@ -83,7 +83,7 @@ function render() {
     return;
   }
 
-  setStatus(`已捕获 ${state.items.length} 个候选资源。`);
+  setStatus(statusTextForItems(state.items), hasDashTracks(state.items));
 
   for (const item of state.items) {
     const fragment = template.content.cloneNode(true);
@@ -108,6 +108,9 @@ function render() {
     if (item.kind === "hls") {
       primary.textContent = "合并下载";
       primary.addEventListener("click", () => openDownloader(item));
+    } else if (item.kind === "dash_track") {
+      primary.textContent = "需合并";
+      primary.disabled = true;
     } else if (item.kind === "dash") {
       primary.textContent = "复制 MPD";
       primary.addEventListener("click", () => copyUrl(item.url));
@@ -178,6 +181,9 @@ function labelKind(kind) {
   if (kind === "dash") {
     return "DASH";
   }
+  if (kind === "dash_track") {
+    return "DASH Track";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -185,6 +191,17 @@ function labelKind(kind) {
     return "Blob";
   }
   return "Video";
+}
+
+function statusTextForItems(items) {
+  if (hasDashTracks(items)) {
+    return "检测到 DASH 分轨。YouTube 通常音视频分离，当前版本不能直接合成完整视频。";
+  }
+  return `已捕获 ${items.length} 个候选资源。`;
+}
+
+function hasDashTracks(items) {
+  return items.some(item => item.kind === "dash_track");
 }
 
 function sizeLabel(item) {

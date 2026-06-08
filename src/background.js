@@ -144,7 +144,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === "MEDIA_CATCHER_GET_TAB") {
         await hydrateStore();
         const tabId = String(message.tabId);
-        const items = withBorrowedThumbnails(Array.from(mediaByTab.get(tabId)?.values() || []));
+        const items = withBorrowedThumbnails(Array.from(mediaByTab.get(tabId)?.values() || []))
+          .filter(item => !isIgnoredMediaUrl(item.url));
         items.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
         sendResponse({ ok: true, items });
         return;
@@ -193,6 +194,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function recordCandidate(candidate) {
   if (!candidate || !candidate.url || typeof candidate.tabId !== "number") {
+    return false;
+  }
+
+  if (isIgnoredMediaUrl(candidate.url)) {
     return false;
   }
 
@@ -248,6 +253,7 @@ function normalizeCandidate(candidate) {
     thumbnail: validThumbnail(candidate.thumbnail) ? candidate.thumbnail : "",
     kind,
     ext: candidate.ext || extensionFromUrl(candidate.url) || "",
+    trackType: candidate.trackType || inferTrackType(candidate.url, candidate.mime),
     mime: candidate.mime || "",
     size: Number.isFinite(candidate.size) ? candidate.size : null,
     width: Number.isFinite(candidate.width) ? candidate.width : null,
@@ -273,6 +279,7 @@ function mergeCandidate(old, next) {
     displayName: betterTitle(next.displayName, old.displayName),
     filename: betterFilename(next.filename, old.filename),
     mime: next.mime || old.mime || "",
+    trackType: next.trackType || old.trackType || "",
     size: next.size || old.size || null,
     thumbnail: next.thumbnail || old.thumbnail || "",
     width: next.width || old.width || null,
@@ -332,11 +339,20 @@ function thumbnailScore(item, source) {
 }
 
 function classifyUrl(rawUrl) {
+  if (isIgnoredMediaUrl(rawUrl)) {
+    return null;
+  }
+
   if (!isSupportedScheme(rawUrl)) {
     if (rawUrl?.startsWith("blob:")) {
       return { kind: "blob", ext: "" };
     }
     return null;
+  }
+
+  const youtubeTrack = classifyYouTubeDashTrack(rawUrl, "");
+  if (youtubeTrack) {
+    return youtubeTrack;
   }
 
   const ext = extensionFromUrl(rawUrl);
@@ -366,13 +382,17 @@ function classifyUrl(rawUrl) {
 }
 
 function classifyKind(kind) {
-  if (["video", "audio", "hls", "dash", "blob"].includes(kind)) {
+  if (["video", "audio", "hls", "dash", "dash_track", "blob"].includes(kind)) {
     return { kind, ext: "" };
   }
   return null;
 }
 
 function classifyResponse(rawUrl, responseInfo, resourceType, fallbackLength = null) {
+  if (isIgnoredMediaUrl(rawUrl)) {
+    return null;
+  }
+
   const ext = extensionFromUrl(rawUrl);
   const headers = typeof responseInfo === "object" && responseInfo
     ? responseInfo
@@ -381,6 +401,10 @@ function classifyResponse(rawUrl, responseInfo, resourceType, fallbackLength = n
   const contentLength = headers.contentLength || null;
   const totalLength = headers.totalLength || contentLength || null;
   const mime = String(contentType || "").toLowerCase().split(";")[0].trim();
+  const youtubeTrack = classifyYouTubeDashTrack(rawUrl, mime);
+  if (youtubeTrack) {
+    return youtubeTrack;
+  }
 
   if (mime.includes("mpegurl") || mime.includes("x-mpegurl") || mime === "application/vnd.apple.mpegurl") {
     return { kind: "hls", ext: "m3u8" };
@@ -640,6 +664,66 @@ function looksLikeAudioUrl(rawUrl) {
   return /(^|[?&/_=-])(audio|music|sound|mp3|m4a|aac|opus)([?&/_=-]|$)/i.test(text);
 }
 
+function isIgnoredMediaUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.replace(/^www\./, "");
+    const path = url.pathname.toLowerCase();
+    if ((host === "youtube.com" || host.endsWith(".youtube.com")) && /\/s\/desktop\/.*\/(no_input|success|error|click|hover)\.mp3$/i.test(path)) {
+      return true;
+    }
+    if ((host === "youtube.com" || host.endsWith(".youtube.com")) && /\/sounds\/.*\.mp3$/i.test(path)) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function classifyYouTubeDashTrack(rawUrl, mime) {
+  try {
+    const url = new URL(rawUrl);
+    if (!/(^|\.)googlevideo\.com$/i.test(url.hostname) || !url.pathname.includes("videoplayback")) {
+      return null;
+    }
+
+    const trackType = inferTrackType(rawUrl, mime);
+    return {
+      kind: "dash_track",
+      ext: trackType === "audio" ? "m4a" : "mp4",
+      trackType
+    };
+  } catch {
+    return null;
+  }
+}
+
+function inferTrackType(rawUrl, mime = "") {
+  const lowerMime = String(mime || "").toLowerCase();
+  if (lowerMime.startsWith("audio/") || lowerMime.includes("audio")) {
+    return "audio";
+  }
+  if (lowerMime.startsWith("video/") || lowerMime.includes("video")) {
+    return "video";
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    const mimeParam = decodeURIComponent(url.searchParams.get("mime") || "").toLowerCase();
+    if (mimeParam.startsWith("audio/") || mimeParam.includes("audio")) {
+      return "audio";
+    }
+    if (mimeParam.startsWith("video/") || mimeParam.includes("video")) {
+      return "video";
+    }
+  } catch {
+    // Ignore malformed URLs.
+  }
+
+  return "";
+}
+
 function decodeMaybe(value) {
   try {
     return decodeURIComponent(String(value || ""));
@@ -651,6 +735,10 @@ function decodeMaybe(value) {
 async function downloadDirect(item) {
   if (!item?.url) {
     throw new Error("Missing download URL.");
+  }
+
+  if (item.kind === "dash_track") {
+    throw new Error("This is a DASH audio/video track, not a complete video. It needs muxing with a dedicated tool.");
   }
 
   if (item.kind === "blob") {
@@ -1031,6 +1119,9 @@ function labelKind(kind) {
   if (kind === "dash") {
     return "DASH";
   }
+  if (kind === "dash_track") {
+    return "DASH Track";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -1087,6 +1178,9 @@ function defaultExtension(kind) {
   }
   if (kind === "dash") {
     return "mpd";
+  }
+  if (kind === "dash_track") {
+    return "mp4";
   }
   return "mp4";
 }

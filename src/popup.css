@@ -98,6 +98,14 @@ button:disabled {
   cursor: default;
 }
 
+.status.warn {
+  padding: 8px 10px;
+  border: 1px solid #efd49a;
+  border-radius: 6px;
+  background: #fff7e6;
+  color: var(--warn);
+}
+
 button.secondary {
   background: #ffffff;
   color: var(--text);
@@ -113,10 +121,6 @@ button.secondary:hover {
   min-height: 22px;
   margin: 8px 0 10px;
   color: var(--muted);
-}
-
-.status.warn {
-  color: var(--warn);
 }
 
 .items {
