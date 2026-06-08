@@ -108,9 +108,12 @@ function render() {
     if (item.kind === "hls") {
       primary.textContent = "合并下载";
       primary.addEventListener("click", () => openDownloader(item));
+    } else if (item.kind === "dash_mux") {
+      primary.textContent = "合并下载";
+      primary.addEventListener("click", () => mergeDash(item));
     } else if (item.kind === "dash_track") {
-      primary.textContent = "需合并";
-      primary.disabled = true;
+      primary.textContent = "复制分轨";
+      primary.addEventListener("click", () => copyUrl(item.url));
     } else if (item.kind === "dash") {
       primary.textContent = "复制 MPD";
       primary.addEventListener("click", () => copyUrl(item.url));
@@ -165,6 +168,21 @@ async function openDownloader(item) {
   }
 }
 
+async function mergeDash(item) {
+  setStatus("正在调用本地助手合并 DASH 音视频...");
+  const response = await sendRuntimeMessage({
+    type: "MEDIA_CATCHER_MERGE_DASH",
+    item
+  });
+
+  if (!response.ok) {
+    setStatus(response.error || "DASH 合并失败。请先启动本地助手。", true);
+    return;
+  }
+
+  setStatus(`合并完成：${response.output || item.filename}`);
+}
+
 async function copyUrl(url) {
   try {
     await navigator.clipboard.writeText(url);
@@ -184,6 +202,9 @@ function labelKind(kind) {
   if (kind === "dash_track") {
     return "DASH Track";
   }
+  if (kind === "dash_mux") {
+    return "DASH MP4";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -194,8 +215,11 @@ function labelKind(kind) {
 }
 
 function statusTextForItems(items) {
+  if (items.some(item => item.kind === "dash_mux")) {
+    return "已捕获 DASH 音视频轨，可通过本地助手合并下载。";
+  }
   if (hasDashTracks(items)) {
-    return "检测到 DASH 分轨。YouTube 通常音视频分离，当前版本不能直接合成完整视频。";
+    return "检测到 DASH 分轨。等待同时捕获音频轨和视频轨后可合并下载。";
   }
   return `已捕获 ${items.length} 个候选资源。`;
 }

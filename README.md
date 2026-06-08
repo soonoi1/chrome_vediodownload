@@ -8,7 +8,7 @@
 - 捕获页面 `<video>`、`<audio>`、`<source>`、下载链接和 Performance 资源列表中的媒体 URL。
 - 捕获 HLS `.m3u8` 清单，打开独立下载页后解析多清晰度 Variant Playlist。
 - 对未加密 HLS 分片进行并发下载，并按顺序合并为 `.ts` 或 fMP4 `.mp4` 文件。
-- 对 DASH `.mpd` 清单进行发现和复制，方便后续交给专用工具处理。
+- 对 YouTube / DASH 的音视频分轨进行识别；启动本地 FFmpeg 助手后，可把已捕获的音频轨和视频轨合并为 `.mp4`。
 
 ## 明确边界
 
@@ -16,7 +16,7 @@
 - 不绕过登录、付费墙、地区限制或网站权限。
 - 不保证下载所有网站。很多平台使用 DRM、一次性签名、专用播放器、服务端鉴权或动态分片策略，浏览器扩展只能下载当前浏览器会话中已经合法可访问的非 DRM 媒体资源。
 - 加密 HLS (`#EXT-X-KEY` 非 `NONE`) 会被识别并拒绝合并下载。
-- YouTube 等站点通常使用 DASH/MSE，音频和视频分轨传输。当前版本会识别这些分轨并提示“需合并”，但不会直接合成完整视频文件。
+- YouTube 等站点通常使用 DASH/MSE，音频和视频分轨传输。当前版本通过本地 FFmpeg 助手合并已捕获的非 DRM 音视频轨，不破解 DRM、不绕过付费或权限限制。
 
 ## 安装
 
@@ -33,8 +33,29 @@
 3. 点击浏览器工具栏里的 Media Catcher，查看捕获列表。
 4. 捕获列表会显示视频缩略图、网页/视频标题、真实文件名、尺寸、时长和来源。缩略图来自当前可见视频窗口的截图裁剪，所以视频需要在屏幕上可见。
 5. 对直接媒体文件点击“下载”；对 HLS 项点击“合并下载”，在新页面选择清晰度并开始下载。
+6. 对 YouTube / DASH 项，先启动本地助手，然后点击 `DASH MP4` 项的“合并下载”。
 
 很多网站会先给播放器一个 `blob:` 临时地址，真实 MP4/HLS 请求要等播放后才出现。如果列表里只有 `Blob` 或没有候选，继续播放几秒后点击“重新扫描”。
+
+## YouTube / DASH 合并下载
+
+这一步需要本机安装 FFmpeg，并启动本地助手服务。
+
+1. 安装 FFmpeg，并确保 `ffmpeg.exe` 在 `PATH` 中，或设置 `FFMPEG_PATH` 环境变量。
+2. 启动助手：
+
+```powershell
+node .\native-helper\server.js
+```
+
+默认输出目录是当前用户的 `Downloads`。可以用环境变量修改：
+
+```powershell
+$env:MEDIA_CATCHER_OUTPUT="D:\Videos"
+node .\native-helper\server.js
+```
+
+助手启动后，回到 YouTube 页面播放视频几秒，打开扩展并点“重新扫描”。当列表出现 `DASH MP4` 项时，点击“合并下载”即可调用 FFmpeg 输出完整 MP4。
 
 ## 本地测试
 
@@ -67,13 +88,14 @@ node .\scripts\test-server.js
 - `src/content-script.js`：扫描页面 DOM、媒体元素和 Performance 资源。
 - `src/popup.html` / `src/popup.css` / `src/popup.js`：扩展弹窗。
 - `src/downloader.html` / `src/downloader.css` / `src/downloader.js`：HLS 清单解析、分片并发下载、顺序合并。
+- `native-helper/server.js`：本地 FFmpeg 合并助手，用于 DASH 音视频轨合并。
 - `test-page/index.html`：Chrome 本地加载后的验证页面。
 - `scripts/validate-extension.ps1`：检查必需文件、JSON 和 JS 语法。
 - `scripts/package-extension.ps1`：生成 Chrome 可加载的 zip 包。
 
 ## 下一步可增强
 
-- 增加 DASH 音视频轨道合并，需要引入 muxer 或 FFmpeg/WASM。
+- 增加合并进度、取消任务和历史记录。
 - 增加下载历史、域名规则、资源过滤和最小大小阈值设置。
 - 增加失败分片重试、速度统计和暂停/恢复。
 - 为 Firefox 做兼容适配。

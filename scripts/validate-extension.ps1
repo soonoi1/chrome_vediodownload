@@ -12,6 +12,7 @@ $required = @(
   "src/downloader.html",
   "src/downloader.css",
   "src/downloader.js",
+  "native-helper/server.js",
   "test-page/index.html"
 )
 
@@ -29,6 +30,7 @@ $jsFiles = @(
   "src/content-script.js",
   "src/popup.js",
   "src/downloader.js",
+  "native-helper/server.js",
   "scripts/test-server.js"
 )
 

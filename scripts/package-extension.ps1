@@ -16,7 +16,8 @@ if (Test-Path $zip) {
 $include = @(
   "manifest.json",
   "README.md",
-  "src"
+  "src",
+  "native-helper"
 )
 
 $paths = $include | ForEach-Object { Join-Path $root $_ }

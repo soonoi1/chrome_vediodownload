@@ -144,8 +144,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === "MEDIA_CATCHER_GET_TAB") {
         await hydrateStore();
         const tabId = String(message.tabId);
-        const items = withBorrowedThumbnails(Array.from(mediaByTab.get(tabId)?.values() || []))
-          .filter(item => !isIgnoredMediaUrl(item.url));
+        const items = prepareTabItems(Array.from(mediaByTab.get(tabId)?.values() || []));
         items.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
         sendResponse({ ok: true, items });
         return;
@@ -174,6 +173,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === "MEDIA_CATCHER_OPEN_DOWNLOADER") {
         const tab = await openDownloader(message.item);
         sendResponse({ ok: true, tabId: tab?.id || null });
+        return;
+      }
+
+      if (message.type === "MEDIA_CATCHER_MERGE_DASH") {
+        const result = await mergeDashTracks(message.item);
+        sendResponse({ ok: true, ...result });
         return;
       }
 
@@ -336,6 +341,64 @@ function thumbnailScore(item, source) {
     score += 8;
   }
   return score;
+}
+
+function prepareTabItems(items) {
+  const filtered = items.filter(item => !isIgnoredMediaUrl(item.url));
+  const withThumbs = withBorrowedThumbnails(filtered);
+  const mux = buildDashMuxItem(withThumbs);
+  return mux ? [mux, ...withThumbs] : withThumbs;
+}
+
+function buildDashMuxItem(items) {
+  const tracks = items.filter(item => item.kind === "dash_track" && isSupportedScheme(item.url));
+  const video = tracks
+    .filter(item => item.trackType === "video" || item.mime.startsWith("video/"))
+    .sort(sortTrackQuality)[0];
+  const audio = tracks
+    .filter(item => item.trackType === "audio" || item.mime.startsWith("audio/"))
+    .sort(sortTrackQuality)[0];
+
+  if (!video || !audio) {
+    return null;
+  }
+
+  const base = video.pageTitle || audio.pageTitle || "video";
+  const displayName = cleanTitle(base) || "DASH video";
+  return {
+    id: `dash_mux_${video.id}_${audio.id}`,
+    tabId: video.tabId || audio.tabId,
+    frameId: video.frameId ?? audio.frameId ?? null,
+    url: video.url,
+    audioUrl: audio.url,
+    videoUrl: video.url,
+    pageUrl: video.pageUrl || audio.pageUrl || "",
+    pageTitle: video.pageTitle || audio.pageTitle || "",
+    displayName,
+    filename: cleanFilename(`${displayName}.mp4`),
+    thumbnail: video.thumbnail || audio.thumbnail || "",
+    kind: "dash_mux",
+    ext: "mp4",
+    mime: "video/mp4",
+    size: (video.size || 0) + (audio.size || 0) || null,
+    width: video.width || null,
+    height: video.height || null,
+    duration: video.duration || audio.duration || null,
+    resourceType: "dash",
+    source: "dash-mux",
+    firstSeen: Math.min(video.firstSeen || Date.now(), audio.firstSeen || Date.now()),
+    lastSeen: Math.max(video.lastSeen || 0, audio.lastSeen || 0),
+    videoTrack: video,
+    audioTrack: audio
+  };
+}
+
+function sortTrackQuality(left, right) {
+  const sizeDiff = (right.size || 0) - (left.size || 0);
+  if (sizeDiff) {
+    return sizeDiff;
+  }
+  return (right.lastSeen || 0) - (left.lastSeen || 0);
 }
 
 function classifyUrl(rawUrl) {
@@ -795,6 +858,33 @@ async function openDownloader(item) {
   });
 }
 
+async function mergeDashTracks(item) {
+  if (!item?.videoUrl || !item?.audioUrl) {
+    throw new Error("Missing DASH audio/video tracks.");
+  }
+
+  const response = await fetch("http://127.0.0.1:17382/merge", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      videoUrl: item.videoUrl,
+      audioUrl: item.audioUrl,
+      filename: item.filename || "video.mp4",
+      referer: item.pageUrl || "",
+      userAgent: navigator.userAgent || "Mozilla/5.0"
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || "Local helper failed to merge DASH tracks.");
+  }
+
+  return data;
+}
+
 async function fetchText(url) {
   if (!isSupportedScheme(url)) {
     throw new Error("Only http/https URLs are supported.");
@@ -1122,6 +1212,9 @@ function labelKind(kind) {
   if (kind === "dash_track") {
     return "DASH Track";
   }
+  if (kind === "dash_mux") {
+    return "DASH MP4";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -1180,6 +1273,9 @@ function defaultExtension(kind) {
     return "mpd";
   }
   if (kind === "dash_track") {
+    return "mp4";
+  }
+  if (kind === "dash_mux") {
     return "mp4";
   }
   return "mp4";
