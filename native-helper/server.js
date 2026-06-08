@@ -63,8 +63,9 @@ async function mergeDash(body) {
 
   const videoUrl = requireHttpUrl(body.videoUrl, "videoUrl");
   const audioUrl = requireHttpUrl(body.audioUrl, "audioUrl");
-  const filename = cleanFilename(body.filename || "video.mp4").replace(/\.(webm|mkv|mov|m4a|mp3)$/i, ".mp4");
-  const output = uniquePath(path.join(outputDir, filename.endsWith(".mp4") ? filename : `${filename}.mp4`));
+  const container = body.container === "mkv" ? "mkv" : "mp4";
+  const filename = withExtension(cleanFilename(body.filename || `video.${container}`), container);
+  const output = uniquePath(path.join(outputDir, filename));
 
   fs.mkdirSync(path.dirname(output), {
     recursive: true
@@ -90,11 +91,14 @@ async function mergeDash(body) {
     "-map",
     "1:a:0",
     "-c",
-    "copy",
-    "-movflags",
-    "+faststart",
-    output
+    "copy"
   ];
+
+  if (container === "mp4") {
+    args.push("-movflags", "+faststart");
+  }
+
+  args.push(output);
 
   await run(ffmpeg, args);
   return {
@@ -222,6 +226,11 @@ function cleanFilename(name) {
     .trim()
     .replace(/^\.+/, "")
     .slice(0, 150) || "video.mp4";
+}
+
+function withExtension(filename, ext) {
+  const cleanExt = ext === "mkv" ? "mkv" : "mp4";
+  return filename.replace(/\.(webm|mkv|mov|m4a|mp3|mp4)$/i, "") + `.${cleanExt}`;
 }
 
 function setCors(response) {

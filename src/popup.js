@@ -111,6 +111,9 @@ function render() {
     } else if (item.kind === "dash_mux") {
       primary.textContent = "合并下载";
       primary.addEventListener("click", () => mergeDash(item));
+    } else if (item.kind === "dash_pending") {
+      primary.textContent = "等待合成";
+      primary.disabled = true;
     } else if (item.kind === "dash_track") {
       primary.textContent = "复制分轨";
       primary.addEventListener("click", () => copyUrl(item.url));
@@ -205,6 +208,9 @@ function labelKind(kind) {
   if (kind === "dash_mux") {
     return "DASH MP4";
   }
+  if (kind === "dash_pending") {
+    return "DASH";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -216,7 +222,10 @@ function labelKind(kind) {
 
 function statusTextForItems(items) {
   if (items.some(item => item.kind === "dash_mux")) {
-    return "已捕获 DASH 音视频轨，可通过本地助手合并下载。";
+    return "已合并显示为一个视频，点合并下载即可保存。";
+  }
+  if (items.some(item => item.kind === "dash_pending")) {
+    return "正在等待另一条音视频轨。继续播放几秒后点重新扫描。";
   }
   if (hasDashTracks(items)) {
     return "检测到 DASH 分轨。等待同时捕获音频轨和视频轨后可合并下载。";

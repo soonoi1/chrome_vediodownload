@@ -35,6 +35,14 @@ const SEGMENT_EXTENSIONS = new Set([
   "cmfa"
 ]);
 
+const YOUTUBE_TRANSIENT_PARAMS = new Set([
+  "alr",
+  "cpn",
+  "range",
+  "rbuf",
+  "rn"
+]);
+
 let hydrated = false;
 let persistTimer = null;
 const mediaByTab = new Map();
@@ -145,7 +153,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await hydrateStore();
         const tabId = String(message.tabId);
         const items = prepareTabItems(Array.from(mediaByTab.get(tabId)?.values() || []));
-        items.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+        items.sort(sortDisplayItems);
         sendResponse({ ok: true, items });
         return;
       }
@@ -225,11 +233,14 @@ async function recordCandidate(candidate) {
     mediaByTab.set(tabKey, tabMedia);
   }
 
+  const kind = classified.kind || enriched.kind;
+  const canonicalUrl = canonicalMediaUrl(enriched.url, kind);
   const normalized = normalizeCandidate({
     ...enriched,
-    kind: enriched.kind || classified.kind,
+    url: canonicalUrl,
+    kind,
     ext: enriched.ext || classified.ext || "",
-    id: makeId(enriched.url, enriched.kind || classified.kind)
+    id: makeId(canonicalUrl, kind)
   });
 
   const old = tabMedia.get(normalized.id);
@@ -242,28 +253,34 @@ async function recordCandidate(candidate) {
 
 function normalizeCandidate(candidate) {
   const kind = candidate.kind || "video";
-  const urlFilename = inferFilename(candidate.url, kind);
+  const canonicalUrl = canonicalMediaUrl(candidate.url, kind);
+  const urlFilename = inferFilename(canonicalUrl, kind);
   const displayName = buildDisplayName(candidate, urlFilename, kind);
   const filename = buildDownloadFilename(candidate, displayName, urlFilename, kind);
+  const size = inferMediaSize(candidate.size, canonicalUrl);
+  const mime = candidate.mime || inferMimeParam(canonicalUrl);
 
   return {
     id: candidate.id,
     tabId: candidate.tabId,
     frameId: candidate.frameId ?? null,
-    url: withoutHash(candidate.url),
+    url: canonicalUrl,
     pageUrl: candidate.pageUrl || "",
     pageTitle: candidate.pageTitle || "",
     displayName,
     filename,
     thumbnail: validThumbnail(candidate.thumbnail) ? candidate.thumbnail : "",
     kind,
-    ext: candidate.ext || extensionFromUrl(candidate.url) || "",
-    trackType: candidate.trackType || inferTrackType(candidate.url, candidate.mime),
-    mime: candidate.mime || "",
-    size: Number.isFinite(candidate.size) ? candidate.size : null,
+    ext: candidate.ext || extensionFromUrl(candidate.url) || mimeToExtension(mime) || "",
+    trackType: candidate.trackType || inferTrackType(candidate.url, mime),
+    mime,
+    size,
     width: Number.isFinite(candidate.width) ? candidate.width : null,
     height: Number.isFinite(candidate.height) ? candidate.height : null,
     duration: Number.isFinite(candidate.duration) ? candidate.duration : null,
+    bitrate: Number.isFinite(candidate.bitrate) ? candidate.bitrate : inferNumberParam(canonicalUrl, "bitrate"),
+    itag: candidate.itag || inferTextParam(canonicalUrl, "itag"),
+    qualityLabel: candidate.qualityLabel || "",
     resourceType: candidate.resourceType || "",
     source: candidate.source || "network",
     firstSeen: candidate.firstSeen || Date.now(),
@@ -285,11 +302,14 @@ function mergeCandidate(old, next) {
     filename: betterFilename(next.filename, old.filename),
     mime: next.mime || old.mime || "",
     trackType: next.trackType || old.trackType || "",
-    size: next.size || old.size || null,
+    size: betterSize(next.size, old.size),
     thumbnail: next.thumbnail || old.thumbnail || "",
     width: next.width || old.width || null,
     height: next.height || old.height || null,
     duration: next.duration || old.duration || null,
+    bitrate: next.bitrate || old.bitrate || null,
+    itag: next.itag || old.itag || "",
+    qualityLabel: next.qualityLabel || old.qualityLabel || "",
     resourceType: next.resourceType || old.resourceType || "",
     firstSeen: old.firstSeen || next.firstSeen || Date.now(),
     lastSeen: Date.now(),
@@ -347,7 +367,30 @@ function prepareTabItems(items) {
   const filtered = items.filter(item => !isIgnoredMediaUrl(item.url));
   const withThumbs = withBorrowedThumbnails(filtered);
   const mux = buildDashMuxItem(withThumbs);
-  return mux ? [mux, ...withThumbs] : withThumbs;
+  const visible = displayItems(withThumbs, mux);
+  const pending = mux ? null : buildDashPendingItem(withThumbs);
+  if (mux) {
+    return [mux, ...visible];
+  }
+  if (pending) {
+    return [pending, ...visible];
+  }
+  return visible;
+}
+
+function displayItems(items, mux) {
+  return items.filter(item => {
+    if (item.kind === "dash_track") {
+      return false;
+    }
+    if (mux && samePage(item, mux) && (item.kind === "blob" || item.kind === "dash" || item.kind === "audio")) {
+      return false;
+    }
+    if (isYouTubePage(item.pageUrl) && item.kind === "audio") {
+      return false;
+    }
+    return true;
+  });
 }
 
 function buildDashMuxItem(items) {
@@ -365,6 +408,8 @@ function buildDashMuxItem(items) {
 
   const base = video.pageTitle || audio.pageTitle || "video";
   const displayName = cleanTitle(base) || "DASH video";
+  const thumbnail = video.thumbnail || bestThumbnail(items, video.pageUrl || audio.pageUrl) || audio.thumbnail || "";
+  const container = isMp4CompatibleTrack(video) && isMp4CompatibleTrack(audio) ? "mp4" : "mkv";
   return {
     id: `dash_mux_${video.id}_${audio.id}`,
     tabId: video.tabId || audio.tabId,
@@ -375,11 +420,12 @@ function buildDashMuxItem(items) {
     pageUrl: video.pageUrl || audio.pageUrl || "",
     pageTitle: video.pageTitle || audio.pageTitle || "",
     displayName,
-    filename: cleanFilename(`${displayName}.mp4`),
-    thumbnail: video.thumbnail || audio.thumbnail || "",
+    filename: cleanFilename(`${displayName}.${container}`),
+    thumbnail,
     kind: "dash_mux",
-    ext: "mp4",
-    mime: "video/mp4",
+    ext: container,
+    container,
+    mime: container === "mp4" ? "video/mp4" : "video/x-matroska",
     size: (video.size || 0) + (audio.size || 0) || null,
     width: video.width || null,
     height: video.height || null,
@@ -393,12 +439,96 @@ function buildDashMuxItem(items) {
   };
 }
 
+function buildDashPendingItem(items) {
+  const tracks = items.filter(item => item.kind === "dash_track" && isSupportedScheme(item.url));
+  if (!tracks.length) {
+    return null;
+  }
+
+  const video = tracks.find(item => item.trackType === "video" || item.mime.startsWith("video/"));
+  const audio = tracks.find(item => item.trackType === "audio" || item.mime.startsWith("audio/"));
+  const anchor = (video || audio || tracks[0]);
+  const base = anchor.pageTitle || "DASH video";
+  const displayName = cleanTitle(base) || "DASH video";
+  const missing = [
+    video ? "" : "video",
+    audio ? "" : "audio"
+  ].filter(Boolean);
+
+  return {
+    id: `dash_pending_${anchor.tabId || "tab"}_${hashString(anchor.pageUrl || anchor.url)}`,
+    tabId: anchor.tabId,
+    frameId: anchor.frameId ?? null,
+    url: anchor.url,
+    pageUrl: anchor.pageUrl || "",
+    pageTitle: anchor.pageTitle || "",
+    displayName,
+    filename: cleanFilename(`${displayName}.mp4`),
+    thumbnail: bestThumbnail(items, anchor.pageUrl) || anchor.thumbnail || "",
+    kind: "dash_pending",
+    ext: "mp4",
+    mime: "video/mp4",
+    size: null,
+    width: video?.width || null,
+    height: video?.height || null,
+    duration: video?.duration || audio?.duration || null,
+    missingTracks: missing,
+    resourceType: "dash",
+    source: "dash-pending",
+    firstSeen: Math.min(...tracks.map(item => item.firstSeen || Date.now())),
+    lastSeen: Math.max(...tracks.map(item => item.lastSeen || 0))
+  };
+}
+
 function sortTrackQuality(left, right) {
-  const sizeDiff = (right.size || 0) - (left.size || 0);
-  if (sizeDiff) {
-    return sizeDiff;
+  const scoreDiff = trackScore(right) - trackScore(left);
+  if (scoreDiff) {
+    return scoreDiff;
   }
   return (right.lastSeen || 0) - (left.lastSeen || 0);
+}
+
+function sortDisplayItems(left, right) {
+  const rankDiff = displayRank(left) - displayRank(right);
+  if (rankDiff) {
+    return rankDiff;
+  }
+  return (right.lastSeen || 0) - (left.lastSeen || 0);
+}
+
+function displayRank(item) {
+  if (item.kind === "dash_mux") {
+    return 0;
+  }
+  if (item.kind === "dash_pending") {
+    return 1;
+  }
+  return 10;
+}
+
+function trackScore(item) {
+  const pixels = (item.width || 0) * (item.height || 0);
+  const bitrate = item.bitrate || 0;
+  const size = item.size || 0;
+  const containerBonus = isMp4CompatibleTrack(item) ? 1_000_000_000_000 : 0;
+  if (item.trackType === "video" || item.mime.startsWith("video/")) {
+    return containerBonus + pixels * 1000 + bitrate + Math.round(size / 1024);
+  }
+  return containerBonus + bitrate * 10 + Math.round(size / 1024);
+}
+
+function bestThumbnail(items, pageUrl = "") {
+  return items
+    .filter(item => item.thumbnail && item.kind !== "audio")
+    .map(item => ({
+      item,
+      score: (pageUrl && item.pageUrl === pageUrl ? 100 : 0) + (item.kind === "blob" ? 20 : 0) + (item.kind === "video" ? 10 : 0)
+    }))
+    .sort((a, b) => b.score - a.score)[0]?.item.thumbnail || "";
+}
+
+function samePage(left, right) {
+  return Boolean(left?.pageUrl && right?.pageUrl && left.pageUrl === right.pageUrl);
 }
 
 function classifyUrl(rawUrl) {
@@ -732,6 +862,9 @@ function isIgnoredMediaUrl(rawUrl) {
     const url = new URL(rawUrl);
     const host = url.hostname.replace(/^www\./, "");
     const path = url.pathname.toLowerCase();
+    if ((host === "youtube.com" || host.endsWith(".youtube.com")) && path.endsWith(".mp3")) {
+      return true;
+    }
     if ((host === "youtube.com" || host.endsWith(".youtube.com")) && /\/s\/desktop\/.*\/(no_input|success|error|click|hover)\.mp3$/i.test(path)) {
       return true;
     }
@@ -747,14 +880,15 @@ function isIgnoredMediaUrl(rawUrl) {
 function classifyYouTubeDashTrack(rawUrl, mime) {
   try {
     const url = new URL(rawUrl);
-    if (!/(^|\.)googlevideo\.com$/i.test(url.hostname) || !url.pathname.includes("videoplayback")) {
+    if (!isYouTubeVideoplaybackUrl(url)) {
       return null;
     }
 
-    const trackType = inferTrackType(rawUrl, mime);
+    const normalizedMime = mime || inferMimeParam(rawUrl);
+    const trackType = inferTrackType(rawUrl, normalizedMime);
     return {
       kind: "dash_track",
-      ext: trackType === "audio" ? "m4a" : "mp4",
+      ext: mimeToExtension(normalizedMime) || (trackType === "audio" ? "m4a" : "mp4"),
       trackType
     };
   } catch {
@@ -787,6 +921,19 @@ function inferTrackType(rawUrl, mime = "") {
   return "";
 }
 
+function inferMimeParam(rawUrl) {
+  try {
+    return decodeURIComponent(new URL(rawUrl).searchParams.get("mime") || "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isMp4CompatibleTrack(item) {
+  const mime = String(item?.mime || inferMimeParam(item?.url || "") || "").toLowerCase();
+  return mime.includes("mp4") || mime.includes("mp4a") || mime.includes("avc1") || mime.includes("h264");
+}
+
 function decodeMaybe(value) {
   try {
     return decodeURIComponent(String(value || ""));
@@ -802,6 +949,10 @@ async function downloadDirect(item) {
 
   if (item.kind === "dash_track") {
     throw new Error("This is a DASH audio/video track, not a complete video. It needs muxing with a dedicated tool.");
+  }
+
+  if (item.kind === "dash_pending") {
+    throw new Error("The DASH video is not ready yet. Play the video a little longer and rescan.");
   }
 
   if (item.kind === "blob") {
@@ -872,6 +1023,7 @@ async function mergeDashTracks(item) {
       videoUrl: item.videoUrl,
       audioUrl: item.audioUrl,
       filename: item.filename || "video.mp4",
+      container: item.container || item.ext || "mp4",
       referer: item.pageUrl || "",
       userAgent: navigator.userAgent || "Mozilla/5.0"
     })
@@ -1018,6 +1170,68 @@ function withoutHash(rawUrl) {
   }
 }
 
+function canonicalMediaUrl(rawUrl, kind = "") {
+  if (!rawUrl) {
+    return "";
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    url.hash = "";
+    if (kind === "dash_track" && isYouTubeVideoplaybackUrl(url)) {
+      for (const param of YOUTUBE_TRANSIENT_PARAMS) {
+        url.searchParams.delete(param);
+      }
+      return url.href;
+    }
+    return url.href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function isYouTubeVideoplaybackUrl(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  return /(^|\.)googlevideo\.com$/i.test(url.hostname) && url.pathname.includes("videoplayback");
+}
+
+function isYouTubePage(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname.replace(/^www\./, "");
+    return host === "youtube.com" || host.endsWith(".youtube.com");
+  } catch {
+    return false;
+  }
+}
+
+function inferMediaSize(size, rawUrl) {
+  const explicit = Number(size);
+  const fromUrl = inferNumberParam(rawUrl, "clen") || inferNumberParam(rawUrl, "contentLength");
+  const candidates = [explicit, fromUrl].filter(Number.isFinite);
+  if (!candidates.length) {
+    return null;
+  }
+  return Math.max(...candidates);
+}
+
+function inferNumberParam(rawUrl, name) {
+  try {
+    const value = new URL(rawUrl).searchParams.get(name);
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function inferTextParam(rawUrl, name) {
+  try {
+    return new URL(rawUrl).searchParams.get(name) || "";
+  } catch {
+    return "";
+  }
+}
+
 function extensionFromUrl(rawUrl) {
   try {
     const path = new URL(rawUrl).pathname;
@@ -1148,6 +1362,13 @@ function betterFilename(left, right) {
   return left;
 }
 
+function betterSize(left, right) {
+  const a = Number(left) || 0;
+  const b = Number(right) || 0;
+  const best = Math.max(a, b);
+  return best || null;
+}
+
 function mediaSuffix(candidate) {
   const parts = [];
   if (candidate.width && candidate.height) {
@@ -1215,6 +1436,9 @@ function labelKind(kind) {
   if (kind === "dash_mux") {
     return "DASH MP4";
   }
+  if (kind === "dash_pending") {
+    return "DASH";
+  }
   if (kind === "audio") {
     return "Audio";
   }
@@ -1278,6 +1502,9 @@ function defaultExtension(kind) {
   if (kind === "dash_mux") {
     return "mp4";
   }
+  if (kind === "dash_pending") {
+    return "mp4";
+  }
   return "mp4";
 }
 
@@ -1311,10 +1538,14 @@ function cleanFilename(name) {
 }
 
 function makeId(url, kind) {
-  const input = `${kind || "media"}:${withoutHash(url)}`;
+  const input = `${kind || "media"}:${canonicalMediaUrl(url, kind)}`;
+  return `m_${hashString(input)}`;
+}
+
+function hashString(input) {
   let hash = 5381;
-  for (let index = 0; index < input.length; index += 1) {
+  for (let index = 0; index < String(input).length; index += 1) {
     hash = (hash * 33) ^ input.charCodeAt(index);
   }
-  return `m_${(hash >>> 0).toString(36)}`;
+  return (hash >>> 0).toString(36);
 }
