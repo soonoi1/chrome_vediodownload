@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HLS Downloader</title>
+    <link rel="stylesheet" href="downloader.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <h1>HLS 合并下载</h1>
+          <p id="sourceUrl"></p>
+        </div>
+        <button id="cancelBtn" type="button" class="secondary" disabled>取消</button>
+      </header>
+
+      <section class="panel">
+        <div class="row">
+          <span>清晰度</span>
+          <div id="variants" class="variants"></div>
+        </div>
+        <div class="row">
+          <span>状态</span>
+          <strong id="stateText">正在读取清单...</strong>
+        </div>
+        <div class="progress">
+          <div id="progressBar"></div>
+        </div>
+        <div id="stats" class="stats"></div>
+        <button id="startBtn" type="button" disabled>开始下载</button>
+      </section>
+
+      <pre id="log" class="log"></pre>
+    </main>
+
+    <script src="downloader.js"></script>
+  </body>
+</html>
